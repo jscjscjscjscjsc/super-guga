@@ -91,6 +91,8 @@ def main():
         QTimer.singleShot(300, window._show_daily_plan)
     if '--bg-live' in sys.argv:
         QTimer.singleShot(300, window._open_bg_live)
+    if '--plugin-market' in sys.argv:
+        QTimer.singleShot(400, window._open_plugin_market)
 
     sys.exit(app.exec_())
 

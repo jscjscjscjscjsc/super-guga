@@ -86,10 +86,12 @@ def _key_values(keys):
     aliases={'return':'enter','escape':'esc','control':'ctrl','control_l':'ctrl','control_r':'ctrl',
         'ctrl_l':'ctrl','alt_l':'alt','alt_r':'alt','shift_l':'shift','shift_r':'shift','super_l':'win','deleteforward':'delete',
         '回车':'enter','发送':'enter','确认':'enter','确定':'enter','提交':'enter',
-        '退格':'backspace','删除':'delete','空格':'space','制表':'tab','取消':'esc','退出':'esc'}
+        '退格':'backspace','删除':'delete','空格':'space','制表':'tab','取消':'esc','退出':'esc',
+        'pgup':'pageup','pgdn':'pagedown','上一页':'pageup','下一页':'pagedown','翻页':'pagedown'}
     parts=[aliases.get(k.strip(),k.strip()) for k in parts]
     codes={'ctrl':17,'alt':18,'shift':16,'win':91,'enter':13,'tab':9,'esc':27,'backspace':8,'delete':46,
-        'up':38,'down':40,'left':37,'right':39,'home':36,'end':35,'space':32}
+        'up':38,'down':40,'left':37,'right':39,'home':36,'end':35,'space':32,
+        'pageup':33,'pagedown':34}
     values=[codes[k] if k in codes else ord(k.upper()) if len(k)==1 and k.isascii()
             else 111+int(k[1:]) if k.startswith('f') and k[1:].isdigit() and 1<=int(k[1:])<=12 else 0 for k in parts]
     if not values or len(values)>5 or 0 in values:

@@ -4,6 +4,10 @@ from urllib.parse import urlsplit
 
 import requests
 
+class ModelConfigurationError(RuntimeError):
+    """Raised before any network call when the chat model config is still a template."""
+
+
 FAILURE_CONTRACT = '''
 【执行与失败协议】
 先区分用户想达到的目标、实际观察到的状态、可用工具。关闭一个页面、切换窗口、读写单个文件是日常操作，不因口语重复、代词或两三步操作就变成复杂任务。
@@ -27,6 +31,11 @@ def exception_evidence(exc, base_url='', *, stage='model_request', elapsed_ms=0,
         queue.extend([item.__cause__,item.__context__,getattr(item,'reason',None)])
         queue.extend(x for x in item.args if isinstance(x,BaseException))
     kinds=set(names)
+    if isinstance(exc,ModelConfigurationError) or 'ModelConfigurationError' in kinds:
+        return dict(code='config',stage='model_request',reason='聊天模型尚未配置，未发出任何网络请求',
+            next_step='在 ai_config.json 中填写 api_key、base_url 和 model 后重启咕嘎',
+            exception_types=names,os_error_codes=sorted(set(codes)),http_status=None,
+            service_host=urlsplit(base_url).hostname,elapsed_ms=round(elapsed_ms,1),request_index=request_index)
     if isinstance(exc,requests.exceptions.ProxyError) or 'ProxyError' in kinds:
         code='proxy';reason='模型请求在代理连接层失败';next_step='核对咕嘎进程使用的代理及代理服务状态'
     elif isinstance(exc,requests.exceptions.SSLError) or any('SSL' in x for x in kinds):

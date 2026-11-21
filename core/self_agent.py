@@ -15,7 +15,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 from core.ai_chat import AIChatEngine, parse_reply
 from core.task_feedback import tool_feedback
 from core.execution_contract import ExecutionLedger, requires_execution
-from core.agent_failure import FAILURE_CONTRACT,exception_evidence,explain_failure
+from core.agent_failure import FAILURE_CONTRACT,ModelConfigurationError,exception_evidence,explain_failure
 
 
 def screen_observation_instructions(observation):
@@ -158,7 +158,7 @@ TOOLS = [
         'fields':{'type':'array','description':'fill_form的字段列表；一次1—30项，用当前观察的ref',
             'items':{'type':'object','properties':{'ref':field('控件ref'),'kind':field('字段类型',['text','select','check']),
                 'value':field('text文字或select选项显示名称'),'checked':field('check的布尔值',typ='boolean')},'required':['ref','kind'],'additionalProperties':False}},
-        'keys':field('press的按键，如Enter、Tab、Control+A'),
+        'keys':field('press的按键，如Enter、Tab、Control+A、PageDown、PageUp；翻页用PageDown/PageUp'),
         'delta':field('scroll垂直像素，最多正负2000',typ='integer'),
         'milliseconds':field('wait等待0—3000毫秒',typ='integer'),'path':field('upload的本地文件绝对路径')},['action']),
     function('agent_skills','查找本机 Codex、DSH、WorkBuddy 用户技能目录中的技能名称和简介，用于决定由谁接力。',{'query':field('按关键词筛选')}),
@@ -392,14 +392,22 @@ class SelfAgent(QObject):
         return desktop_capability(self.bridge,callback,cancel)
 
     def _request(self, messages, session_id, tools=True):
-        base = self.config.get('base_url', 'https://api.deepseek.com').rstrip('/')
-        headers = {'Authorization': 'Bearer ' + self.config.get('api_key', ''),
+        base = str(self.config.get('base_url') or '').rstrip('/')
+        api_key = str(self.config.get('api_key') or '').strip()
+        model = str(self.config.get('model') or '').strip()
+        if (not base.startswith(('http://', 'https://')) or 'YOUR_' in base.upper()
+                or not api_key or 'YOUR_' in api_key.upper()
+                or not model or 'YOUR_' in model.upper()):
+            # A template config would otherwise be sent through the system proxy,
+            # producing a misleading "ProxyError" instead of a setup hint.
+            raise ModelConfigurationError('聊天模型未配置')
+        headers = {'Authorization': 'Bearer ' + api_key,
                    'Content-Type': 'application/json'}
         endpoint = urlsplit(base)
         if endpoint.hostname == 'opencode.ai' and endpoint.path.startswith(('/inference/go/', '/zen/go/')):
             headers.update({'User-Agent': 'GugaDesktopPet/1.0', 'x-opencode-session': session_id})
         routine=getattr(self,'_routine_request',False)
-        payload = dict(model=self.config.get('model', 'deepseek-v4.1-flash'), messages=messages,
+        payload = dict(model=model, messages=messages,
                        max_tokens=2048 if routine else max(4096, min(8192, int(self.config.get('agent_max_tokens', 4096)))),
                        temperature=.5, thinking={'type': 'disabled' if routine else 'enabled'}, stream=False)
         # DashScope rejects reasoning_effort outright when thinking is off:

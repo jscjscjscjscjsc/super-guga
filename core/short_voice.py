@@ -17,6 +17,7 @@ class ShortVoice(QObject):
         self.max_seconds=max_seconds;self.phase='idle';self.draft='';self._worker=None
         self.stop_event=threading.Event();self._submit=False
         self.before_start=None
+        self.last_capture={}
 
     def _state(self,value):
         self.phase=value;self.state.emit(value)
@@ -25,7 +26,7 @@ class ShortVoice(QObject):
         if self.active:return True
         if self._worker and self._worker.is_alive():
             self.failed.emit('上一段录音正在释放麦克风，请稍后再点');return False
-        self.active=True;self.draft='';self._submit=False;self.generation+=1
+        self.active=True;self.draft='';self.last_capture={};self._submit=False;self.generation+=1
         generation=self.generation;stop=self.stop_event=threading.Event()
         before_start=self.before_start
         self._state('preparing')
@@ -34,8 +35,8 @@ class ShortVoice(QObject):
             try:
                 if self.recorder is None:
                     from core.asr import ASRRecorder
-                    self.recorder=(self.factory or ASRRecorder)()
-                if not self.recorder.available:raise RuntimeError('离线语音识别未就绪，请检查 Vosk 模型和麦克风依赖')
+                    self.recorder=self.factory() if self.factory else ASRRecorder(prefer_sense_voice=True)
+                if not self.recorder.available:raise RuntimeError(getattr(self.recorder,'error',None) or '离线语音识别未就绪，请检查识别模型和麦克风依赖')
                 if stop.is_set() or generation!=self.generation:return
                 if before_start:before_start()
                 if stop.is_set() or generation!=self.generation:return
@@ -44,6 +45,7 @@ class ShortVoice(QObject):
                 if generation!=self.generation:return
                 self._state('recording');deadline=time.monotonic()+self.max_seconds
                 while not stop.wait(.08) and time.monotonic()<deadline:
+                    if self.recorder.error:raise RuntimeError(self.recorder.error)
                     if generation==self.generation:self.level.emit(getattr(self.recorder,'level',0.))
                 if generation==self.generation:self._state('transcribing')
                 text=self.recorder.stop();recording=False
@@ -51,6 +53,7 @@ class ShortVoice(QObject):
                 if self.recorder.error:raise RuntimeError(self.recorder.error)
                 text=re.sub(r'(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])','',str(text).strip())
                 if not text:raise RuntimeError('没有识别到语音，请靠近麦克风再试一次')
+                self.last_capture=dict(frames_captured=getattr(self.recorder,'_frame_count',0))
                 if self._submit:
                     self.active=False;self.transcript.emit(text)
                 else:
@@ -68,7 +71,7 @@ class ShortVoice(QObject):
 
     def stop(self,cancel=False):
         if cancel:
-            self.generation+=1;self.active=False;self.draft='';self._submit=False
+            self.generation+=1;self.active=False;self.draft='';self.last_capture={};self._submit=False
             self.stop_event.set();self._state('idle');return
         if not self.active:return
         self._submit=True

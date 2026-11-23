@@ -70,5 +70,57 @@ class IndependentChatTests(unittest.TestCase):
             self.assertEqual(p.answer.last_receipt['state'],'completed')
         finally:p.busy=False;p._run_kind=None
 
+    def test_local_transcript_reaches_model_with_capture_facts_and_next_text_resets(self):
+        p=self.panel;captured=[]
+        response=Mock(status_code=200)
+        response.iter_lines.side_effect=lambda **kwargs:iter([
+            'data: '+json.dumps({'choices':[{'delta':{'content':'收到这句语音了。'}}]},ensure_ascii=False),'data: [DONE]'])
+        cfg=dict(api_key='fixture',base_url='https://example.test/v1',model='fixture-model')
+        p.store.append(p.active_id,'assistant','我没有麦克风权限，只能看到打字。')
+        p.short_voice.last_capture=dict(frames_captured=8000)
+        try:
+            with patch('core.model_settings.load_config',return_value=cfg),patch('core.chat_answer.requests.post',side_effect=lambda *a,**kw:(captured.append(kw['json']) or response)):
+                p._short_transcript('你怎么知道我刚才说了什么')
+                self.pump(lambda:not p.busy)
+                self.assertEqual(p.answer.last_receipt['input_source'],'local_asr')
+                self.assertIn('你怎么知道我刚才说了什么',p.pet._agent_bubble.recognized.text())
+                self.assertFalse(p.pet._agent_bubble.recognized.isHidden())
+                self.assertTrue(p.send('那文字呢'))
+                self.pump(lambda:not p.busy)
+                self.assertTrue(p.pet._agent_bubble.recognized.isHidden())
+            first=captured[0]['messages'][-2]['content'];second=captured[1]['messages'][-2]['content']
+            self.assertIn('本条用户消息来自点击录音',first);self.assertIn('实际采集到麦克风音频帧',first)
+            self.assertIn('历史回答中的能力或权限判断可能有误',first)
+            self.assertIn('本条是文字输入',second);self.assertNotIn('本条用户消息来自点击录音',second)
+            self.assertEqual(p.store.messages(p.active_id)[-2]['content'],'那文字呢')
+        finally:p.busy=False;p._run_kind=None
+
+    def test_recorded_microphone_check_answers_locally_and_preserves_history(self):
+        from core.voice_context import MICROPHONE_CHECK_REPLY, is_microphone_check, voice_context
+        p=self.panel
+        text='可以听到了称呼吗'
+        self.assertFalse(is_microphone_check(text,voice_context('local_asr')))
+        self.assertFalse(is_microphone_check(text,voice_context('keyboard',dict(frames_captured=8000))))
+        captured=voice_context('local_asr',dict(frames_captured=8000))
+        for phrase in ('你能听到我说话吗？','咕嘎，可以听到我的声音吗？',text):
+            self.assertTrue(is_microphone_check(phrase,captured))
+        self.assertFalse(is_microphone_check('你能听到我说话吗，帮我打开微信',captured))
+        with patch.object(p.answer,'start') as answer,patch.object(p.dialogue,'start') as dialogue,patch.object(p.pet._tts,'speak') as speak,patch.object(p.pet._tts,'_silent',False):
+            p.short_voice.last_capture=dict(frames_captured=8000)
+            p._short_transcript(text)
+            answer.assert_not_called();dialogue.assert_not_called()
+            speak.assert_called_once_with(MICROPHONE_CHECK_REPLY,voice_profile=None)
+            self.assertEqual(p.pet._agent_bubble.full_text,MICROPHONE_CHECK_REPLY)
+            self.assertEqual([m['content'] for m in p.store.messages(p.active_id)[-2:]],[text,MICROPHONE_CHECK_REPLY])
+
+    def test_recorded_question_during_background_task_keeps_voice_source(self):
+        p=self.panel;p.busy=True;p._run_kind='dsh'
+        try:
+            with patch.object(p.dialogue,'start') as dialogue:
+                self.assertTrue(p.send('给我讲个笑话',read_reply=True,input_source='local_asr',voice_receipt=dict(frames_captured=4000)))
+                self.assertEqual(dialogue.call_args.kwargs['voice_context']['input_source'],'local_asr')
+                self.assertTrue(p.busy)
+        finally:p._dialogue_context=None;p.busy=False;p._run_kind=None
+
 
 if __name__=='__main__':unittest.main()

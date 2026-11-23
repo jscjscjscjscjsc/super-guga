@@ -7,16 +7,38 @@ ROOT=Path(__file__).resolve().parents[1]
 CONFIG=ROOT/'ai_config.json'
 
 
+def is_placeholder(value):
+    value=str(value or '').strip().lower()
+    return not value or value.startswith(('your_','your-','<your','replace_')) or 'your_openai_compatible_endpoint' in value
+
+
+def configuration_error(cfg):
+    if is_placeholder(cfg.get('api_key')):return '聊天密钥尚未配置，请在桌面管理台填写 DeepSeek 等模型服务的 API 密钥'
+    base=str(cfg.get('base_url','')).strip()
+    try:endpoint=urlsplit(base)
+    except ValueError:return '聊天服务地址无效，请在桌面管理台重新填写'
+    if is_placeholder(base) or not endpoint.hostname or endpoint.scheme not in ('http','https') or endpoint.username or is_placeholder(endpoint.hostname):
+        return '聊天服务地址尚未配置，请在桌面管理台填写完整的服务地址'
+    if is_placeholder(cfg.get('model')):return '聊天模型名称尚未配置，请在桌面管理台填写模型名称'
+    return ''
+
+
 def read_raw(path=CONFIG):
-    try:return json.loads(Path(path).read_text(encoding='utf-8-sig'))
+    try:
+        value=json.loads(Path(path).read_text(encoding='utf-8-sig'))
+        return value if isinstance(value,dict) else {}
     except (OSError,ValueError):return {}
 
 
 def dsh_driver(home=None):
     import yaml
     home=Path(home or Path.home())
-    path=home/'.dsh/profiles/web/cordis.patch.yml'
-    rows=yaml.safe_load(path.read_text(encoding='utf-8')) or []
+    paths=[home/'.dsh/profiles'/profile/'cordis.patch.yml' for profile in ('web','desktop')]
+    path=next((p for p in paths if p.is_file()),None)
+    if path is None:raise ValueError('没有找到本机 DSH 模型配置，请在管理台选择自定义模型服务')
+    try:rows=yaml.safe_load(path.read_text(encoding='utf-8')) or []
+    except (OSError,yaml.YAMLError):raise ValueError('DSH 模型配置无法读取，请在管理台手动设置') from None
+    if not isinstance(rows,list):raise ValueError('DSH 模型配置格式不正确，请在管理台手动设置')
     selected=next((r.get('config',{}) for r in rows if isinstance(r,dict) and r.get('id')=='agent-default-model'),{})
     provider=selected.get('provider','');model=selected.get('model','')
     providers={}
@@ -36,7 +58,7 @@ def resolve_config(raw,home=None):
     if ref:
         import yaml
         try:stored=(yaml.safe_load((home/'.dsh/.credentials.yaml').read_text(encoding='utf-8')) or {}).get('refs',{})
-        except (OSError,ValueError):stored={}
+        except (OSError,ValueError,yaml.YAMLError):stored={}
         cfg['api_key']=stored.get(ref) or os.environ.get(ref,'')
     return cfg
 
@@ -67,9 +89,11 @@ def vision_config(cfg):
 def public_settings():
     try:
         cfg=load_config();endpoint=urlsplit(cfg.get('base_url',''))
+        provider=cfg.get('tts_provider') or 'edge'
+        voice='咕嘎专属声线' if provider=='guga_local' else cfg.get('edge_voice') or 'zh-CN-XiaoyiNeural'
         return dict(driver=dict(source=cfg.get('driver_source','custom'),model=cfg.get('model',''),host=endpoint.hostname,
-                    credential_configured=bool(cfg.get('api_key'))),speech=dict(provider=cfg.get('tts_provider') or 'edge',
-                    voice=cfg.get('edge_voice') or 'zh-CN-XiaoyiNeural'),manual_voice_independent=True)
+                    credential_configured=not is_placeholder(cfg.get('api_key')),ready=not bool(configuration_error(cfg)),
+                    error=configuration_error(cfg)),speech=dict(provider=provider,voice=voice),manual_voice_independent=True)
     except Exception:return dict(driver=dict(credential_configured=False),speech=dict(provider='edge'),manual_voice_independent=True)
 
 
@@ -81,7 +105,8 @@ def save_settings(updates,path=CONFIG):
         endpoint=urlsplit(str(cfg.get('base_url','')))
         if endpoint.scheme not in ('http','https') or not endpoint.netloc or endpoint.username:
             raise ValueError('模型地址需要完整的 http:// 或 https:// 服务地址')
-        if not str(cfg.get('model','')).strip():raise ValueError('请填写模型名称')
+        error=configuration_error(cfg)
+        if error:raise ValueError(error)
     target=Path(path);temporary=target.with_name(target.name+'.pending')
     temporary.write_text(json.dumps(cfg,ensure_ascii=False,indent=2),encoding='utf-8')
     os.replace(temporary,target)
@@ -92,7 +117,8 @@ def test_driver(config):
     import requests
     from core.chat_answer import request_payload
     cfg=resolve_config(config)
-    if not cfg.get('api_key'):raise ValueError('驱动模型没有可用密钥；请在管理台配置或选择本地 DSH')
+    error=configuration_error(cfg)
+    if error:raise ValueError(error)
     payload=request_payload(cfg,[dict(role='user',content='只回复：连接成功')],'quick')
     payload.update(stream=False,max_tokens=64);payload.pop('stream_options',None)
     response=requests.post(cfg['base_url'].rstrip('/')+'/chat/completions',

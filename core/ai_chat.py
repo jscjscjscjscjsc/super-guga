@@ -198,7 +198,8 @@ class AIChatEngine(QObject):
 
     @property
     def enabled(self) -> bool:
-        return bool(self._cfg.get('api_key'))
+        from core.model_settings import configuration_error
+        return not configuration_error(self._cfg)
 
     def is_busy(self) -> bool:
         """是否正在请求中（自动观战用它避免打断正在进行的对话/分析）"""
@@ -210,7 +211,8 @@ class AIChatEngine(QObject):
 
     def ask(self, user_msg: str, rag_query: str = None, system_override: str = None):
         if not self.enabled:
-            self.failed.emit("未配置 API Key")
+            from core.model_settings import configuration_error
+            self.failed.emit(configuration_error(self._cfg))
             return
         rag_context = build_context(rag_query or user_msg) if (rag_query or user_msg) else ""
         if self._worker and self._worker.is_alive():

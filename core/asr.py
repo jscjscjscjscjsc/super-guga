@@ -2,7 +2,7 @@
 """咕嘎企鹅语音识别模块 — 麦克风录音 + Vosk 离线中文识别
 
 - 依赖：sounddevice（录音）、vosk（识别）
-- 模型：vosk-model-small-cn（首次自动下载到 .zcode/tools/vosk-model-cn）
+- 模型：随项目携带 resources/models/vosk-model-small-cn-0.22
 - 自动增益：录音时按峰值归一化（笔记本麦克风通常声音偏小）
 - 用法：
     recorder = ASRRecorder()
@@ -15,14 +15,19 @@ import logging
 import os
 import queue
 import threading
+import hashlib
+import shutil
+import tempfile
+from pathlib import Path
 
 # 模型下载地址（若缺失）
-VOSK_MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-small-cn-0.3.zip'
+VOSK_MODEL_URL = 'https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip'
 
 # 注意：vosk 的 C++ 引擎不支持非 ASCII 路径！
 # 原始位置在用户目录下（可能含中文），实际加载必须用 ASCII 路径：
 # 优先 %TEMP%\vosk-model-cn（复制品），否则用 8.3 短名转换。
 _MODEL_SRC = os.path.join(os.environ.get('USERPROFILE', ''), '.zcode', 'tools', 'vosk-model-cn')
+_BUNDLED_MODEL = Path(__file__).resolve().parents[1]/'resources/models/vosk-model-small-cn-0.22'
 
 # 自动增益目标峰值（int16），太小听不清，太大削波
 _GAIN_PEAK = 7000
@@ -65,41 +70,58 @@ def _ascii_path(path: str) -> str:
         import ctypes
         buf = ctypes.create_unicode_buffer(1024)
         n = ctypes.windll.kernel32.GetShortPathNameW(path, buf, 1024)
-        if n and buf.value:
+        if n and buf.value and buf.value.isascii():
             return buf.value
     except Exception:
         pass
     return path
 
 
+def _valid_model(path):
+    return all((Path(path)/name).is_file() for name in ('am/final.mdl','conf/model.conf','graph/HCLr.fst'))
+
+
 def _ensure_model_dir() -> str:
-    """返回可用的 ASCII 模型目录（必要时从源复制到 %TEMP%）"""
-    # 1) 临时目录里的复制品（ASCII）
-    tmp = os.path.join(os.environ.get('TEMP', ''), 'vosk-model-cn')
-    if tmp and os.path.isdir(tmp):
-        return tmp
-    # 2) 源目录的 8.3 短名
-    src = _ascii_path(_MODEL_SRC)
-    if os.path.isdir(src):
-        return src
-    # 3) 复制到临时目录
-    if os.path.isdir(_MODEL_SRC):
-        try:
-            import shutil
-            shutil.copytree(_MODEL_SRC, tmp)
-            return tmp
-        except Exception:
-            pass
-    return _MODEL_SRC
+    """Use the portable bundle; native Vosk gets an ASCII path even on Chinese desktops."""
+    sources=[os.environ.get('GUGA_VOSK_MODEL'),str(_BUNDLED_MODEL),_MODEL_SRC,
+             str(Path(tempfile.gettempdir())/'vosk-model-cn')]
+    for value in sources:
+        if not value or not _valid_model(value):continue
+        source=Path(value)
+        short=_ascii_path(str(source))
+        if short.isascii():return short
+        ident=hashlib.sha256((str(source.resolve())+str((source/'am/final.mdl').stat().st_mtime_ns)).encode()).hexdigest()[:16]
+        for base in (os.environ.get('LOCALAPPDATA'),tempfile.gettempdir()):
+            if not base:continue
+            cache=Path(base)/'Guga/asr-cache'/ident
+            short_cache=_ascii_path(str(cache.parent))
+            if not short_cache.isascii():continue
+            cache=Path(short_cache)/ident
+            try:
+                if not _valid_model(cache):
+                    cache.parent.mkdir(parents=True,exist_ok=True)
+                    staging=Path(tempfile.mkdtemp(prefix=ident+'-',dir=cache.parent))
+                    try:
+                        shutil.copytree(source,staging,dirs_exist_ok=True)
+                        try:staging.rename(cache)
+                        except FileExistsError:
+                            if not _valid_model(cache):raise
+                    finally:
+                        # Only remove the unique staging directory we created inside our cache.
+                        if staging.is_dir() and staging.resolve().parent==cache.parent.resolve():shutil.rmtree(staging)
+                return str(cache)
+            except OSError:continue
+    return str(_BUNDLED_MODEL)
 
 
 MODEL_DIR = _ensure_model_dir()
+SENSE_VOICE_DIR = Path(__file__).resolve().parents[1] / 'runtime/voice/sense-voice'
 
 
 class ASRRecorder:
     """按住说话式录音器（start 开始，stop 结束并转写）"""
 
-    def __init__(self):
+    def __init__(self, *, prefer_sense_voice=False):
         self._q = queue.Queue()
         self._stream = None
         self._recording = False
@@ -108,6 +130,8 @@ class ASRRecorder:
         self._model = None
         self._sd = None
         self._vosk = None
+        self._sense_voice = None
+        self._prefer_sense_voice = prefer_sense_voice
         self.result = ''
         self.error = None
         self.device = None
@@ -115,15 +139,26 @@ class ASRRecorder:
         self._peak = 0
         self.level = 0.
         self._start_time = 0.0
-        self.backend='vosk';self._pcm=[]
+        self.backend = 'vosk'
+        self._pcm = []
+
+    @property
+    def recognition_backend(self):
+        return self.backend
 
     @property
     def available(self) -> bool:
         """依赖与模型是否就绪"""
         if not self._check_imports():
             return False
+        if self._ensure_sense_voice():
+            self.backend = 'sense_voice'
+            return True
         from core.local_transcription import available
-        if available():self.backend='whisper-small';return True
+        if available():
+            self.backend = 'whisper-small'
+            return True
+        self.backend = 'vosk'
         return self._ensure_model()
 
     def _check_imports(self):
@@ -135,39 +170,59 @@ class ASRRecorder:
                 self._vosk = vosk
             except ImportError:self._vosk=None
             return True
-        except ImportError:
+        except (ImportError,OSError):
+            self.error='录音依赖不可用，请使用桌面文件夹内的“启动咕嘎.cmd”启动'
             return False
 
     def _ensure_model(self) -> bool:
         if self._model is not None:
             return True
         if self._vosk is None:
+            self.error = '缺少 Vosk 离线识别依赖'
             return False
         # 检查模型目录（解压后是 vosk-model-small-cn-0.22 子目录）
         if not os.path.isdir(MODEL_DIR):
+            self.error='缺少本地中文识别模型，请将 Vosk 中文小模型放到 resources/models/vosk-model-small-cn-0.22'
             return False
         try:
             self._model = self._vosk.Model(MODEL_DIR)
+            self.error = None
             return True
         except Exception:
+            self.error='中文识别模型无法加载，请检查模型文件是否完整，以及模型缓存目录是否可写'
             return False
 
+    def _ensure_sense_voice(self):
+        if not self._prefer_sense_voice:
+            return False
+        if self._sense_voice is not None:
+            return True
+        model = SENSE_VOICE_DIR / 'model.int8.onnx'
+        tokens = SENSE_VOICE_DIR / 'tokens.txt'
+        if not (model.is_file() and tokens.is_file()):
+            return False
+        try:
+            from sherpa_onnx import OfflineRecognizer
+
+            self._sense_voice = OfflineRecognizer.from_sense_voice(
+                model=str(model), tokens=str(tokens), num_threads=2, provider='cpu', language='auto',
+            )
+        except (ImportError, OSError, RuntimeError, ValueError):
+            self._prefer_sense_voice = False
+            return False
+        return True
+
     def start(self):
-        if self._recording:
+        if self._recording or (self._thread and self._thread.is_alive()):
             return
-        if not self._check_imports():
-            self.error = '缺少 sounddevice/vosk 依赖，请先安装'
-            return
-        from core.local_transcription import available
-        self.backend='whisper-small' if available() else 'vosk'
-        if self.backend=='vosk' and not self._ensure_model():
-            self.error = f'未找到中文语音模型（{MODEL_DIR}），请先下载'
+        if not self.available:
             return
         self.result = ''
         self.error = None
+        self._q=queue.Queue()
         self._recording = True
-        self._pcm=[];self._q=queue.Queue()
-        self._recognizer = self._vosk.KaldiRecognizer(self._model, 16000) if self.backend=='vosk' else None
+        self._pcm = []
+        self._recognizer = self._vosk.KaldiRecognizer(self._model, 16000) if self.backend == 'vosk' else None
         self.device = _pick_input_device()
         self._frame_count = 0
         self._peak = 0
@@ -182,30 +237,59 @@ class ASRRecorder:
         try:
             with sd.RawInputStream(samplerate=16000, blocksize=4000, dtype='int16',
                                    channels=1, device=self.device, callback=self._callback):
-                while self._recording or not self._q.empty():
-                    # 持续消费队列，交给 recognizer
-                    try:
-                        data = self._q.get(timeout=0.3)
-                        self._pcm.append(data)
-                        if self._recognizer is not None and self._recognizer.AcceptWaveform(data):
-                            res = self._recognizer.Result()
-                            import json as _json
-                            try:
-                                txt = _json.loads(res).get('text', '')
-                                if txt:
-                                    self.result += txt
-                            except Exception:
-                                pass
-                    except queue.Empty:
-                        continue
+                while self._recording:
+                    self._accept(self._q.get())
         except Exception as e:
             self.error = f'录音设备错误: {e}'
+        finally:
+            self._recording=False
+            # The stream is closed now: consume the final callback blocks before FinalResult.
+            while not self._q.empty():self._accept(self._q.get_nowait())
+
+    def _accept(self, data):
+        if data is None:
+            return
+        if self.backend != 'vosk':
+            self._pcm.append(data)
+        elif self._recognizer.AcceptWaveform(data):
+            self.result += json.loads(self._recognizer.Result()).get('text', '')
+
+    def _transcribe_buffer(self, pcm):
+        if not pcm:
+            return ''
+        if self.backend == 'sense_voice':
+            try:
+                import numpy as np
+
+                samples = np.frombuffer(b''.join(pcm), dtype='<i2').astype(np.float32) / 32768.0
+                stream = self._sense_voice.create_stream()
+                stream.accept_waveform(16000, samples)
+                self._sense_voice.decode_stream(stream)
+                self.result = stream.result.text.strip()
+                return self.result
+            except (OSError, RuntimeError, ValueError):
+                self._sense_voice = None
+                self._prefer_sense_voice = False
+        from core.local_transcription import available, transcribe
+
+        if available():
+            try:
+                self.backend = 'whisper-small'
+                self.result = transcribe(b''.join(pcm))
+                return self.result.strip()
+            except Exception as exc:
+                logging.getLogger(__name__).info('Whisper unavailable, using Vosk: %s', type(exc).__name__)
+        try:
+            self.backend = 'vosk'
+            self.result = self._transcribe_backup(pcm)
+        except Exception:
+            self.error = '离线语音识别暂不可用，请检查本地中文识别模型'
+        return self.result.strip()
 
     def _callback(self, indata, frames, time_info, status):
         import numpy as np
         raw = bytes(indata)
         self._frame_count += frames
-        # 自动增益：按块峰值放大到目标，防止笔记本麦克风声音过小
         try:
             arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
             peak = float(np.abs(arr).max()) if arr.size else 0.0
@@ -218,28 +302,19 @@ class ASRRecorder:
 
     def stop(self):
         """停止录音并完成转写（同步，返回文本）"""
-        if not self._recording:
-            return self.result
         self._recording = False
         if self._thread:
+            if self._thread.is_alive():
+                self._q.put(None)  # Wake the consumer if Send falls between audio blocks.
             self._thread.join(timeout=5)
             if self._thread.is_alive():
-                self.error='麦克风尚未释放，本轮没有提交识别结果';return ''
+                self.error = '麦克风尚未释放，本轮没有提交识别结果'
+                return ''
         pcm, self._pcm = self._pcm, []
         if self.error:
             return ''
-        if self.backend == 'whisper-small':
-            try:
-                from core.local_transcription import transcribe
-                self.result = transcribe(b''.join(pcm))
-            except Exception as exc:
-                logging.getLogger(__name__).info('Whisper unavailable, using Vosk: %s', type(exc).__name__)
-                try:
-                    self.result = self._transcribe_backup(pcm)
-                    self.backend = 'vosk'
-                except Exception:
-                    self.error = '离线语音识别暂不可用，请检查本地中文识别模型'
-            return self.result.strip()
+        if self.backend != 'vosk':
+            return self._transcribe_buffer(pcm)
         # 取残留
         if self._recognizer is not None:
             try:
@@ -253,6 +328,7 @@ class ASRRecorder:
                     pass
             except Exception:
                 pass
+            self._recognizer=None
         return self.result.strip()
 
     def _transcribe_backup(self, pcm):
@@ -287,14 +363,18 @@ def transcribe_wav_path(wav_path: str) -> str:
     rec = vosk.KaldiRecognizer(model, 16000)
     import wave
     with wave.open(wav_path, 'rb') as wf:
+        if (wf.getnchannels(),wf.getsampwidth(),wf.getframerate())!=(1,2,16000):
+            raise ValueError('转写需要 16kHz、16bit、单声道 WAV')
+        parts=[]
         while True:
             data = wf.readframes(4000)
             if len(data) == 0:
                 break
             if rec.AcceptWaveform(data):
-                pass
+                import json
+                parts.append(json.loads(rec.Result()).get('text',''))
     import json as _json
     try:
-        return _json.loads(rec.FinalResult()).get('text', '')
+        return ''.join(parts+[_json.loads(rec.FinalResult()).get('text', '')])
     except Exception:
         return ''

@@ -1,0 +1,9 @@
+{
+  "model": "vosk-model-small-cn-0.22",
+  "download_url": "https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip",
+  "license": "Apache-2.0",
+  "archive_bytes": 43898754,
+  "archive_sha256": "3af8b0e7e0f835ae9d414ce5df580237a3cfb08d586c9fbbb0f7ff29ad5b14ba",
+  "install_directory": "resources/models/vosk-model-small-cn-0.22",
+  "note": "The desktop bundle includes this model. Unicode installation paths are cached to an ASCII directory by core/asr.py. Model files are local runtime assets and are not committed to Git."
+}

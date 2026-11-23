@@ -80,6 +80,7 @@ def main():
         attach_butler_safe(window)
     except Exception:
         pass
+    window.play_startup_animation(automatic=True)
     if '--summon-fish' in sys.argv:
         QTimer.singleShot(400, lambda:window._multi_agent.summon('002'))
     # Only an explicit launch flag starts capture; normal startup stays quiet.

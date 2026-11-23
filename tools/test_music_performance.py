@@ -15,8 +15,12 @@ APP=QApplication.instance() or QApplication([])
 class MusicTests(unittest.TestCase):
  def test_explicit_song_and_stop_are_local_commands(self):
   self.assertEqual(match('帮我唱一首《跳楼机》')['target'],'跳楼机')
+  self.assertEqual(match('咕嘎，我想听稻香')['target'],'稻香')
+  self.assertEqual(match('我想要听《夜曲》')['target'],'夜曲')
+  self.assertEqual(match('点歌：夜曲 - 周杰伦')['target'],'夜曲 - 周杰伦')
   self.assertEqual(match('停止唱歌')['kind'],'music_stop')
   self.assertFalse(match('你喜欢跳楼机这首歌吗')['matched'])
+  self.assertFalse(match('我想听听你的建议')['matched'])
   self.assertEqual(match('戴上墨镜')['target'],'sunglasses')
   for request in ('唱歌','给我唱首歌吧','我想听你唱歌','你能不能唱一首歌'):
    self.assertEqual(match(request)['target'],'晴天')
@@ -52,12 +56,15 @@ class MusicTests(unittest.TestCase):
     from PyQt5.QtMultimedia import QMediaPlaylist,QMediaPlayer
     self.assertEqual(music.playlist.playbackMode(),QMediaPlaylist.CurrentItemInLoop)
     self.assertTrue(music.status()['repeat'])
-    music._state(QMediaPlayer.PlayingState);self.assertFalse(music.interaction.isActive())
+    music._state(QMediaPlayer.PlayingState);self.assertTrue(music.playing)
     music.stop();self.assertFalse(music.repeat);self.assertFalse(music.requested)
- def test_missing_song_is_failure_not_fake_tts(self):
+ def test_missing_song_starts_discovery_instead_of_playback(self):
   with tempfile.TemporaryDirectory() as d,patch('core.music_performance.MUSIC',Path(d)):
    music=MusicPerformance()
-   self.assertFalse(music.sing('跳楼机')['ok']);self.assertFalse(music.playing)
+   with patch.object(music,'prepare',return_value=dict(ok=True,execution_pending=True)) as preparation,patch.object(music.player,'play') as play:
+    self.assertTrue(music.sing('跳楼机')['execution_pending'])
+   preparation.assert_called_once_with('跳楼机')
+   play.assert_not_called()
  def test_gesture_accessory_and_dance_are_independent(self):
   a=SpriteAnimator(str(ROOT/'resources'),250)
   a.trigger_action('sunglasses');a.trigger_action('dance')
@@ -69,6 +76,7 @@ class MusicTests(unittest.TestCase):
   a.trigger_action('remove_sunglasses');self.assertFalse(a.sunglasses)
  def test_singing_glasses_are_latched_even_after_long_interaction(self):
   a=SpriteAnimator(str(ROOT/'resources'),250)
+  a.clips.pop('personality:sing',None)
   a.set_music_stage(True);self.assertTrue(a.sunglasses)
   a.trigger_action('remove_sunglasses');a._tick_action()
   self.assertTrue(a.sunglasses);self.assertEqual(a._sunglasses_until,0)
@@ -85,12 +93,24 @@ class MusicTests(unittest.TestCase):
    im=QImage(a.width,a.height,QImage.Format_ARGB32);im.fill(Qt.transparent);p=QPainter(im);a.draw(p,0,0);p.end();return im
   normal=frame();a.trigger_action('sunglasses');self.assertNotEqual(normal,frame())
  def test_stop_invalidates_stale_conversion_result(self):
-  music=MusicPerformance();generation=music.generation;music.stop()
-  with patch.object(music,'sing') as play:
-   music._prepared(dict(generation=generation,ok=True,title='跳楼机'))
+  from PyQt5.QtCore import QProcess
+  music=MusicPerformance();job=QProcess(music);music.job=job;music.stop()
+  with patch.object(music,'_play') as play:
+   music._finish_job(job,0)
    play.assert_not_called()
- def test_source_does_not_match_song_so_conversion_does_not_start(self):
-  with tempfile.TemporaryDirectory() as d,patch('core.music_performance.MUSIC',Path(d)):
-   folder=Path(d);(folder/'source.json').write_text(json.dumps(dict(title='其他歌曲',path='missing')))
-   music=MusicPerformance();self.assertFalse(music.prepare('跳楼机')['ok']);self.assertFalse(music.preparing)
+
+ def test_open_catalog_matches_exact_title_and_artist_and_allows_derivatives(self):
+  from core.song_library import split_title
+  from core.song_sources import select_recording
+  base=dict(title='夜曲',duration=210000,url='https://prod-1.storage.jamendo.com/song.mp3')
+  nd=dict(base,creator='歌手甲',license='by-nd')
+  short=dict(base,creator='歌手甲',license='by',duration=15000)
+  expected=dict(base,creator='歌手甲',license='by')
+  another=dict(base,creator='歌手乙',license='by-sa')
+  title,artist=split_title('歌手甲的《夜曲》')
+  self.assertEqual(select_recording([nd,short,expected,another],title,artist),expected)
+  with self.assertRaisesRegex(ValueError,'多个同名'):
+   select_recording([expected,another],title,'')
+  with self.assertRaisesRegex(ValueError,'没有找到'):
+   select_recording([nd,short,dict(expected,title='不是夜曲')],title,artist)
 if __name__=='__main__':unittest.main()

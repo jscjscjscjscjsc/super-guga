@@ -30,6 +30,7 @@ class FloatingTests(unittest.TestCase):
         cls.patches=[patch('core.keyboard_hook.KeyboardHook.start'),patch('ui.tts_engine.TTSEngine.speak'),patch('core.browser_launch.default_executable',return_value=None)]
         for p in cls.patches:p.start()
         cls.pet=PetWindow()
+        cls.pet._tts.set_silent(False)
         for timer in cls.pet.findChildren(QTimer):timer.stop()
         cls.pet._anim.stop()
         cls.panel=AgentChatWindow(cls.pet,ChatWorkspace(cls.path/'chat.db'));cls.pet._agent_panel=cls.panel
@@ -237,13 +238,16 @@ class FloatingTests(unittest.TestCase):
         self.assertFalse(p._task_heartbeat_timer.isActive());self.assertEqual(p._run_kind,'answer')
     def test_short_voice_reply_uses_original_tts_and_personality(self):
         p=self.panel
-        with patch.object(p.answer,'start') as answer:
+        with patch.object(p.answer,'start') as answer,patch.object(p.pet._tts,'speak') as speak:
             p._short_transcript('你好，咕嘎')
+            speak.assert_not_called()
         self.assertTrue(answer.call_args.kwargs['read_aloud'])
+        self.assertEqual(answer.call_args.kwargs['voice_context']['input_source'],'local_asr')
+        self.assertTrue(answer.call_args.kwargs['voice_context']['transcript_received'])
         with patch.object(self.pet,'_say_with_expression') as legacy,patch.object(self.pet,'_show_agent_bubble') as show:
             p._completed(dict(kind='answer',conversation_id=p.active_id,ok=True,text='饲养员，本鹅在呢。',expression='happy',action='none',read_aloud=True))
             legacy.assert_not_called()
-            show.assert_not_called()
+            show.assert_called_once()
             self.assertEqual(p.active_agent_id,'001')
             self.assertIsNotNone(p._pending_tts_display)
             p._local_tts_playback_started('')

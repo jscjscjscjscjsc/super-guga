@@ -270,7 +270,13 @@ def check(engine=None):
     if silent and not last_error:
         last_error = 'silent=true（agent/silent 开启，本机朗读被静默）'
 
-    ok = (not silent) and playback_ok and (edge_ok or doubao_ok)
+    if provider == 'guga_local':
+        from core.guga_voice import available
+        voice = '咕嘎专属声线'
+        synth_available = available()
+    else:
+        synth_available = edge_ok or doubao_ok
+    ok = (not silent) and playback_ok and synth_available
     return {
         'ok': bool(ok),
         'silent': bool(silent),
@@ -516,19 +522,23 @@ def _probe_inprocess(text='测试'):
             from ui.tts_engine import strip_punct
             spoken = strip_punct(str(text or '').strip()) or '测试'
 
+            provider = getattr(engine, 'provider', 'edge') or 'edge'
             handle = tempfile.NamedTemporaryFile(
-                prefix=_PROBE_PREFIX, suffix='.mp3', delete=False)
+                prefix=_PROBE_PREFIX, suffix='.wav' if provider == 'guga_local' else '.mp3', delete=False)
             path = handle.name
             handle.close()
 
-            provider = getattr(engine, 'provider', 'edge') or 'edge'
             used = ''
             synth_ok = False
-            if getattr(engine, '_use_edge', False) and provider != 'doubao':
+            if provider == 'guga_local':
+                synth_ok = engine._guga_voice_worker.synthesize(spoken, path)
+                if synth_ok:
+                    used = 'guga_local'
+            elif getattr(engine, '_use_edge', False) and provider != 'doubao':
                 synth_ok = bool(engine._synth_edge(spoken, path))
                 if synth_ok:
                     used = 'edge'
-            if not synth_ok and getattr(engine, '_use_doubao', False):
+            if not synth_ok and provider != 'guga_local' and getattr(engine, '_use_doubao', False):
                 synth_ok = bool(engine._synth_doubao(spoken, path))
                 if synth_ok:
                     used = 'doubao'
@@ -551,6 +561,8 @@ def _probe_inprocess(text='测试'):
     except Exception as e:
         result['error'] = '%s: %s' % (type(e).__name__, e)
     finally:
+        if engine is not None and '--probe-child' in sys.argv:
+            engine.close_voice_worker()
         if path:
             try:
                 if os.path.exists(path):

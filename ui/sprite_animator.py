@@ -631,6 +631,7 @@ class SpriteAnimator:
         for f in sorted(os.listdir(stickers_dir)):
             if not f.lower().endswith('.gif'):
                 continue
+            im = None
             try:
                 im = PILImage.open(os.path.join(stickers_dir, f))
                 frames = []
@@ -649,6 +650,8 @@ class SpriteAnimator:
                     }
             except Exception:
                 continue
+            finally:
+                if im is not None:im.close()
 
     def _load_action_frames(self, name, frames_dir, fps=15.0, lazy=False, reference_width=None, placement=None):
         """Load a transparent PNG animation without GIF palette loss."""

@@ -52,6 +52,8 @@ Thumbs.db
 
 # Atomic local credential writes
 ai_config.json.tmp
+ai_config.json.pending
+resources/models/vosk-model-small-cn-*/
 *.sqlite3
 *.sqlite3-*
 *.db

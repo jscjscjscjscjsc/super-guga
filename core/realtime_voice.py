@@ -97,8 +97,10 @@ def load_settings():
     try:
         with CONFIG_PATH.open(encoding='utf-8-sig') as f:
             cfg = json.load(f)
-    except FileNotFoundError:
+    except (OSError,ValueError):
         cfg = {}
+    if not isinstance(cfg,dict):cfg={}
+    if not isinstance(cfg.get('realtime_voice',{}),dict):cfg['realtime_voice']={}
     settings = dict(DEFAULTS, **cfg.get('realtime_voice', {}))
     # A long call is resident by design. Inactivity is the only automatic
     # exit: 5-30 minutes, default 30. Zero or malformed values from older
@@ -114,7 +116,9 @@ def with_environment_credentials(settings):
     provider = settings.get('provider', 'qianwen')
     env_name = {SEED_PROVIDER: 'VOLCENGINE_SPEECH_API_KEY', 'custom': 'GUGA_REALTIME_API_KEY'}.get(
         provider, 'DASHSCOPE_API_KEY')
-    settings['api_key'] = settings.get('api_key') or os.getenv(env_name, '')
+    from core.model_settings import is_placeholder
+    if is_placeholder(settings.get('api_key')):
+        settings['api_key'] = os.getenv(env_name, '')
     if provider == 'bailian':
         settings['workspace_id'] = settings.get('workspace_id') or os.getenv('DASHSCOPE_WORKSPACE_ID', '')
     return settings
@@ -131,8 +135,9 @@ def connection_url(cfg):
     provider = cfg.get('provider', 'qianwen')
     if provider not in PROVIDER_NAMES:
         raise ValueError('请选择受支持的实时语音平台')
-    if not cfg.get('api_key', '').strip():
-        raise ValueError('请填写所选平台的 API Key')
+    from core.model_settings import is_placeholder
+    if is_placeholder(cfg.get('api_key')):
+        raise ValueError('请填写所选平台的 API Key；也可以使用点击录音对话')
     model = cfg.get('model', '').strip()
     if provider == SEED_PROVIDER:
         if model != SEED_MODEL:

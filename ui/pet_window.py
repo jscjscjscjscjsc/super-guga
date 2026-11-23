@@ -7,7 +7,7 @@ logging.basicConfig(
     level=logging.WARNING, format='%(asctime)s %(message)s'
 )
 
-from PyQt5.QtCore import Qt, QPoint, QRect, QRectF, QTimer, QElapsedTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QPoint, QRect, QRectF, QTimer, QElapsedTimer, QEasingCurve, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import (
     QPixmap, QIcon, QPainter, QColor, QFont, QCursor,
     QFontMetrics, QPen, QPainterPath, QRadialGradient
@@ -79,6 +79,11 @@ class PetWindow(QWidget):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setWindowTitle('咕嘎 · 桌宠')
         self._config = ConfigManager()
+        self._startup_splash = None
+        self._startup_splash_active = False
+        self._startup_automatic = False
+        self._startup_arrival = None
+        self._greet_after_splash = False
         from core.agent_memory import AgentMemoryStore
         self._agent_memory = AgentMemoryStore()
         from ui.multi_agent_window import MultiAgentManager
@@ -275,16 +280,18 @@ class PetWindow(QWidget):
             self.set_pet_hidden(True)
 
         QTimer.singleShot(200, self._force_top)
-        # 咕嘎企鹅启动问候
+        self._welcome_timer = QTimer(self)
+        self._welcome_timer.setSingleShot(True)
+        self._welcome_timer.timeout.connect(self._startup_greeting)
         QTimer.singleShot(0, self._start_pet_presence)
 
     def _start_pet_presence(self):
-        if not self.isVisible():return
+        if not self.isVisible() or self._startup_splash_active:return
         started=self._config._s.value('animation/entrance',True,type=bool) and self._play_entrance()
-        QTimer.singleShot(6300 if started else 1500,self._startup_greeting)
+        self._welcome_timer.start(6300 if started else 1500)
 
     def _startup_greeting(self):
-        if self._startup_greeting_allowed and self.isVisible():
+        if self._startup_greeting_allowed and self.isVisible() and not self._startup_splash_active:
             self._say_with_expression('咕嘎～本鹅来了！冰面很滑，小心别摔了！','happy','none')
 
     def _play_entrance(self):
@@ -359,6 +366,113 @@ class PetWindow(QWidget):
         if accepted:
             self._config._s.setValue('animation/entrance_volume',value)
             if self._entrance_sound:self._entrance_sound.setVolume(value/100.)
+
+    def play_startup_animation(self, automatic=False):
+        from ui.startup_splash import GugaStartupSplash, startup_enabled
+        if automatic and (self._desktop_hidden or not startup_enabled(self._config._s, sys.argv)):
+            return False
+        if self._startup_splash is not None and self._startup_splash.active:
+            self._startup_splash.raise_()
+            return False
+        self._finish_startup_arrival()
+        try:
+            if self._startup_splash is None:
+                splash = GugaStartupSplash(self.RES_DIR, self._config._s, self)
+                splash.finished.connect(self._startup_animation_finished)
+                self._startup_splash = splash
+            started = self._startup_splash.play(self.screen())
+        except Exception:
+            self._cancel_startup_animation('error')
+            logging.exception('Startup animation unavailable; continuing with the desktop pet')
+            return False
+        if started:
+            self._startup_automatic = automatic
+            self._greet_after_splash = self._welcome_timer.isActive() or (automatic and self._startup_greeting_allowed)
+            if self._anim2d.active_clip == 'personality:entrance':
+                self._anim2d.stop_clip(natural=True)
+            if self._entrance_sound is not None:
+                self._entrance_sound.stop()
+            self._welcome_timer.stop()
+            self._startup_splash_active = True
+            self.update()
+        return started
+
+    def _startup_animation_finished(self, reason):
+        self._startup_splash_active = False
+        fly_in = self._startup_automatic and reason == 'finished' and self.isVisible() and not self._desktop_hidden
+        self._startup_automatic = False
+        if fly_in and self._start_startup_arrival():
+            return
+        self.update()
+        if self._greet_after_splash and reason in ('finished', 'skipped'):
+            self._welcome_timer.start(250)
+        self._greet_after_splash = False
+
+    def _start_startup_arrival(self):
+        target = self.pos()
+        screen = QApplication.screenAt(self.frameGeometry().center()) or self.screen()
+        if screen is None:
+            return False
+        bounds = screen.geometry()
+        if not bounds.intersects(self.frameGeometry()):
+            return False
+        animation = QVariantAnimation(self)
+        animation.setDuration(820)
+        animation.setStartValue(0.)
+        animation.setEndValue(1.)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._startup_arrival = (animation, target, bounds)
+
+        def fly(progress):
+            lift = min(110, self.height() * .37)
+            x = target.x() + (bounds.right() + 1 - target.x()) * (1. - progress)
+            y = target.y() - lift * (1. - progress) - lift * .23 * math.sin(math.pi * progress)
+            self.move(round(x), round(y))
+            self.update()
+
+        animation.valueChanged.connect(fly)
+        animation.finished.connect(self._finish_startup_arrival)
+        fly(0.)
+        animation.start()
+        return True
+
+    def _finish_startup_arrival(self, greet=True):
+        if self._startup_arrival is None:
+            return
+        animation, target, _ = self._startup_arrival
+        self._startup_arrival = None
+        animation.stop()
+        animation.deleteLater()
+        self.move(target)
+        self.update()
+        if greet and self._greet_after_splash:
+            self._welcome_timer.start(250)
+        self._greet_after_splash = False
+
+    def _cancel_startup_animation(self, reason='interaction'):
+        splash = getattr(self, '_startup_splash', None)
+        if splash is not None and splash.active:
+            splash.finish(reason)
+        self._finish_startup_arrival(greet=False)
+
+    def _set_startup_animation_enabled(self, enabled):
+        self._config._s.setValue('startup/animation', bool(enabled))
+
+    def _import_song_audio(self):
+        from PyQt5.QtWidgets import QFileDialog,QInputDialog,QMessageBox
+        from pathlib import Path
+        path,_=QFileDialog.getOpenFileName(self,'导入歌曲音频',str(Path.home()),'音频文件 (*.mp3 *.wav *.flac *.m4a *.ogg);;所有文件 (*)')
+        if not path:return
+        title,ok=QInputDialog.getText(self,'歌曲名称','用什么歌名来点播？',text=Path(path).stem.split(' - ')[0])
+        if not ok:return
+        try:
+            from core.music_performance import import_local_song
+            entry=import_local_song(path,title)
+            text='已有咕嘎翻唱，可以直接点歌。' if entry.get('source_kind')=='guga_cover' else '点歌后会制作咕嘎翻唱。'
+            self._show_agent_bubble('已导入《'+title+'》。'+text)
+        except Exception:
+            QMessageBox.warning(self,'导入未完成','无法导入此音频，请检查文件能否正常播放、歌曲库文件和磁盘空间。')
+        self._config._s.sync()
 
     # ==================== 子控件 ====================
 
@@ -631,9 +745,14 @@ class PetWindow(QWidget):
             self._anim.look_at(*gaze)
 
     def paintEvent(self, e):
+        if self._startup_splash_active:
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.save()
+        if self._startup_arrival is not None:
+            bounds = self._startup_arrival[2]
+            p.setClipRect(QRect(self.mapFromGlobal(bounds.topLeft()), bounds.size()))
         p.scale(self._pet_scale,self._pet_scale)
 
         ox, oy = self._anim_offset.x(), self._anim_offset.y()
@@ -886,6 +1005,29 @@ class PetWindow(QWidget):
         label = {'auto':'自动分工','self':'咕嘎自己处理','codex':'Codex','dsh':'DSH','workbuddy':'WorkBuddy'}[backend]
         self._show_agent_bubble('已切换为'+label+'。交代任务后，我会连接对应的执行器。')
 
+    def _add_opening_menu(self, look):
+        opening = look.addMenu('开场动画')
+        opening.addAction('重播开场动画').triggered.connect(lambda _checked=False:self.play_startup_animation())
+        startup_animation = opening.addAction('启动时播放开场动画')
+        startup_animation.setCheckable(True)
+        startup_animation.setChecked(self._config._s.value('startup/animation', True, type=bool))
+        startup_animation.toggled.connect(self._set_startup_animation_enabled)
+        startup_sound = opening.addAction('播放开场音效')
+        startup_sound.setCheckable(True)
+        startup_sound.setChecked(self._config._s.value('startup/sound', True, type=bool))
+        startup_sound.toggled.connect(lambda enabled: self._config._s.setValue('startup/sound', enabled))
+        def refresh_opening():
+            startup_animation.setChecked(self._config._s.value('startup/animation', True, type=bool))
+            startup_sound.setChecked(self._config._s.value('startup/sound', True, type=bool))
+        opening.aboutToShow.connect(refresh_opening)
+    def _add_song_actions(self, stage):
+        stage.addAction('导入歌曲音频…').triggered.connect(self._import_song_audio)
+        for title in ('晴天', '偏爱'):
+            stage.addAction(f'播放《{title}》').triggered.connect(
+                lambda checked=False, name=title: self._ensure_agent_panel().send('唱'+name))
+        stage.addAction('停止唱歌').triggered.connect(
+            lambda: self._ensure_agent_panel().runtime.music.stop())
+
     def _ensure_pet_menu(self):
         menu = getattr(self, '_pet_menu', None)
         if menu is not None:
@@ -908,6 +1050,8 @@ class PetWindow(QWidget):
         more.addAction('每日计划', self._show_daily_plan)
         look = more.addMenu('桌宠外观')
         self._add_size_actions(look)
+        self._add_opening_menu(look)
+        self._add_song_actions(look.addMenu('音乐与动作'))
         look.addAction('动作与行为…', self._show_behavior_dialog)
         look.addAction('找回桌宠到主屏', self._reset_pos)
         staff = more.addMenu('任务执行器')
@@ -991,6 +1135,7 @@ class PetWindow(QWidget):
         team.addAction("展开完整对话 · 当前同伴").triggered.connect(self._open_agent_chat)
         look = menu.addMenu("🎨 外观与动作")
         self._add_size_actions(look)
+        self._add_opening_menu(look)
         appearance = look.addMenu("形象 · 可随时切换")
         self._menu_avatar_3d = appearance.addAction("3D 开发预览（已暂停）")
         self._menu_avatar_3d.setCheckable(True)
@@ -1013,7 +1158,33 @@ class PetWindow(QWidget):
             action.triggered.connect(lambda checked=False, mode=value: self._set_work_cap(mode))
             self._work_cap_actions[value] = action
         look.addAction('动作与行为…').triggered.connect(self._show_behavior_dialog)
-        self._menu_hide = look.addAction("隐藏桌宠")
+        stage = look.addMenu("🎵 音乐与动作")
+        demo = stage.addAction("3D 动作演示（已暂停，保留原画）")
+        demo.setEnabled('--experimental-avatar-3d' in sys.argv)
+        demo.triggered.connect(self._show_avatar_actions)
+        natural = stage.addMenu('自然动作 · 视频')
+        for label, gesture in (('困倦打盹','idle_doze'), ('双手比心','idle_heart'),
+                               ('抱臂嘟嘴','idle_pout'), ('仰头大笑','idle_laugh')):
+            natural.addAction(label).triggered.connect(
+                lambda _checked=False, name=gesture: self._perform_gesture(name))
+        expressions = stage.addMenu('表情')
+        for label, expression in (('开心', 'happy'), ('傲娇', 'playful'), ('惊讶', 'surprised'),
+                                  ('困了', 'sleepy'), ('委屈', 'sad'), ('日常', 'normal')):
+            expressions.addAction(label).triggered.connect(
+                lambda checked=False, expr=expression: self._anim.set_expression(expr))
+        stage.addAction("暗中观察").triggered.connect(lambda: self._perform_gesture("sneak_peek"))
+        stage.addAction("暂停唱歌，聊一会儿").triggered.connect(
+            lambda: self._ensure_agent_panel().send("暂停唱歌"))
+        stage.addAction("继续唱歌").triggered.connect(
+            lambda: self._ensure_agent_panel().send("继续唱歌"))
+        self._menu_sunglasses = stage.addAction("戴上墨镜")
+        self._menu_sunglasses.triggered.connect(
+            lambda: self._perform_gesture('remove_sunglasses' if self._anim.sunglasses else 'sunglasses'))
+        self._menu_dance = stage.addAction("轻轻摆动")
+        self._menu_dance.triggered.connect(
+            lambda: self._perform_gesture('stop_dance' if self._anim.dancing else 'dance'))
+        self._add_song_actions(stage)
+        self._menu_hide = look.addAction("🐧 隐藏桌宠 · 保留悬浮入口")
         self._menu_hide.triggered.connect(
             lambda: self.set_pet_hidden(not self._desktop_hidden))
         if self._desktop_hidden:
@@ -1073,6 +1244,7 @@ class PetWindow(QWidget):
         if hasattr(self,'_pet_physics'):self._pet_physics.stop()
         if self._entrance_sound:self._entrance_sound.stop()
         if self._anim2d.active_clip=='personality:entrance':self._anim2d.stop_clip(natural=True)
+        self._cancel_startup_animation()
         panel=getattr(self,'_agent_panel',None)
         if panel is not None:
             import time
@@ -1083,6 +1255,9 @@ class PetWindow(QWidget):
         if hasattr(self,'_pet_physics'):self._pet_physics.stop()
         sound=getattr(self,'_entrance_sound',None)
         if sound is not None:sound.stop()
+        if getattr(self, '_welcome_timer', None) is not None:
+            self._welcome_timer.stop()
+        self._cancel_startup_animation('hidden')
         anim=getattr(self,'_anim',None);gaze=getattr(self,'_gaze_timer',None)
         if anim is not None:anim.stop()
         if gaze is not None:gaze.stop()
@@ -1110,8 +1285,8 @@ class PetWindow(QWidget):
                 return
         except Exception:
             pass
-        if self._ai.enabled:
-            # AI 互动：戳一下企鹅，它会用 DS 大脑回话（表情+调侃）
+        if self._ai.enabled and self._tts.provider != 'guga_local':
+            # 使用其他音色时，保留原来的 AI 点击互动。
             self._ai.ask("（饲养员用手指轻轻戳了戳你圆滚滚的肚子，想逗你玩。你被他戳醒了，吐槽他一句，再咕嘎一声。）")
         else:
             line = get_speech("click")
@@ -1172,6 +1347,7 @@ class PetWindow(QWidget):
     # ==================== AI 对话 ====================
 
     def _ensure_agent_panel(self):
+        self._cancel_startup_animation()
         if self._agent_panel is None:
             from ui.agent_chat import AgentChatWindow
             self._agent_panel = AgentChatWindow(self,memory=getattr(self,'_agent_memory',None))
@@ -2728,13 +2904,16 @@ class PetWindow(QWidget):
         self._status.set_all(**self._config.load_status())
 
     def _save_state(self):
-        self._config.save_pos(self.x(), self.y())
+        position = self._startup_arrival[1] if self._startup_arrival is not None else self.pos()
+        self._config.save_pos(position.x(), position.y())
         s = self._status.snapshot()
         self._config.save_status(s["hunger"], s["happy"], s["energy"])
 
     def _quit(self):
         if getattr(self,'_experience',None):self._experience.stop()
         if self._entrance_sound:self._entrance_sound.stop()
+        self._cancel_startup_animation('quit')
+        self._welcome_timer.stop()
         self._voice_record_timer.stop()
         self._pet_physics.stop()
         if getattr(self,'_screen_tools',None):self._screen_tools.stop()
@@ -2755,6 +2934,7 @@ class PetWindow(QWidget):
                 pass
         try:
             self._tts.stop()
+            self._tts.close_voice_worker()
             self._anim.stop()
             if self._anim3d is not None:
                 self._anim3d.close()

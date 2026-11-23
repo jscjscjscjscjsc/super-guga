@@ -61,7 +61,7 @@ EXPRESSION_TOOL=dict(type='function',name='set_expression',
     description='切换咕嘎已有的表情贴图。根据对话情境适度使用；sleepy困倦、sad委屈、surprised惊讶、playful傲娇、happy开心。困倦保持到主人主动说话、发消息或点击后恢复happy，不能自行唤醒。其他表情保持到下次明确切换；normal恢复常态。静默调用，不朗读标签。',
     parameters=dict(type='object',properties=dict(name=dict(type='string',enum=['normal','happy','sleepy','surprised','sad','playful'])),required=['name'],additionalProperties=False))
 
-MUSIC_TOOL=dict(type='function',name='perform_music',description='用户明确要求唱歌或点歌时，立即播放已制作的咕嘎翻唱；未指定歌曲默认晴天。暂停/继续/停止也用本工具。普通聊天提到歌曲不调用。',
+MUSIC_TOOL=dict(type='function',name='perform_music',description='用户明确点歌时播放已有咕嘎翻唱，或搜索音源并制作。当用户指出歌手，用“歌名 - 歌手”传入。未指定歌曲默认晴天。暂停、继续和停止也用本工具。普通聊天提到歌曲不调用。',
     parameters=dict(type='object',properties=dict(action=dict(type='string',enum=['sing','pause','resume','stop']),title=dict(type='string',description='歌名；sing未指定时为晴天')),required=['action'],additionalProperties=False))
 
 DELEGATE_INSTRUCTIONS = '''

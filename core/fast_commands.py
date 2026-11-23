@@ -333,12 +333,15 @@ def _match_team_discuss(ctx):
 
 
 # --- 表演：唱歌 / 音乐开关 / 手势 -----------------------------------------
-_SINGING_LEAD = re.compile(r'^(?:你能不能|你能|能不能|能|我想听你|我想听|想听你|想听)')
+_SINGING_LEAD = re.compile(r'^(?:你能不能|你能|能不能|能|(?:我)?想(?:要)?听你?)')
 _SINGING_TAIL = re.compile(r'(?:给我听|给我|听听|听|吧|好吗|可以吗)[？?。！!]*$')
 _SINGING_REQUESTS = ('唱歌', '唱首歌', '唱一首歌', '来首歌', '来一首歌', '唱一下歌')
 _MUSIC_TOGGLE_TEXTS = ('暂停唱歌', '暂停音乐', '暂停一下', '继续唱歌', '继续音乐')
 _MUSIC_STOP_TEXTS = ('停止唱歌', '停歌', '别唱了', '停止音乐')
-_SING_TITLE = re.compile(r'(?:唱(?:一首|首|一下)?|来一首|播放翻唱)\s*《?(.+?)》?')
+_POINT_SONG = re.compile(r'点歌[：:,，\s]*(.{1,100})')
+_SING_TITLE = re.compile(
+    r'(?:唱(?:一首|首|一下)?|来一首|播放翻唱|(?:我)?想(?:要)?听(?:(?:你)?唱)?(?:一首(?=《))?|播放(?=《))\s*(.{1,100})')
+_NON_SONG = re.compile(r'^(?:一下)?(?:你(?:说|聊|讲|的)|听(?:你|这|那|听)|一首歌|首歌|歌$|个故事)')
 _GESTURES = {
     '戴墨镜': 'sunglasses', '戴上墨镜': 'sunglasses', '摘墨镜': 'remove_sunglasses', '摘下墨镜': 'remove_sunglasses',
     '跳舞': 'dance', '摇摆': 'dance', '晃动身体': 'dance', '停止跳舞': 'stop_dance', '停止摇摆': 'stop_dance',
@@ -381,12 +384,30 @@ def _match_music_stop(ctx):
                 target='', silent=True)
 
 
-def _match_sing_title(ctx):
-    hit = _SING_TITLE.fullmatch(ctx.value)
-    if not hit or len(hit.group(1)) >= 80:
+def _match_point_song(ctx):
+    # Test this before the generic desktop command “点…”.
+    hit = _POINT_SONG.fullmatch(ctx.value)
+    if not hit:
         return None
     return dict(ctx.prefix, matched=True, action='performance', kind='sing',
-                target=hit.group(1).strip('《》'), silent=True)
+                target=hit[1].strip(), silent=True)
+
+
+def _match_sing_title(ctx):
+    hit = _SING_TITLE.fullmatch(ctx.value)
+    if not hit:
+        return None
+    title = hit[1].strip()
+    if '《' in title:
+        title = re.sub(r'》(给我听|听听|吧|好吗|可以吗)$', '》', title)
+    else:
+        title = re.sub(r'(给我听|好吗|可以吗)$', '', title)
+    if title.startswith('《') and title.endswith('》'):
+        title = title[1:-1]
+    if not title or _NON_SONG.match(title) or re.search(r'[，,。！？!?]', title):
+        return None
+    return dict(ctx.prefix, matched=True, action='performance', kind='sing',
+                target=title, silent=True)
 
 
 # --- 结束通话 -------------------------------------------------------------
@@ -675,6 +696,7 @@ _MATCH_RULES = (
     _match_dsh_follow,
     _match_daily_plan,
     _match_input_method_question,
+    _match_point_song,
     _match_desktop_or_browser_step,
     _match_work_tail,
     _match_summon,

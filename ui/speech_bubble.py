@@ -96,6 +96,9 @@ class PetSpeechBubble(QFrame):
         self.text.setStyleSheet('font:13px "Microsoft YaHei UI";color:#303b49;')
         self.text.setAttribute(Qt.WA_TransparentForMouseEvents)
         layout.addWidget(self.text)
+        self.recognized=QLabel();self.recognized.setObjectName('BubbleHint');self.recognized.setWordWrap(True)
+        self.recognized.setTextFormat(Qt.PlainText);self.recognized.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.recognized.hide();layout.addWidget(self.recognized)
         self.alignment_box=QFrame();alignment_layout=QVBoxLayout(self.alignment_box)
         alignment_layout.setContentsMargins(0,2,0,2)
         self.alignment_buttons=[]
@@ -292,6 +295,11 @@ class PetSpeechBubble(QFrame):
         if ident and ident!=self._alignment_id:return
         self._alignment_id='';self.alignment_box.hide();self.alignment_input.hide()
         self._sync_composer()
+    def show_recognized(self,text):
+        text=str(text).strip()
+        self.recognized.setText('已识别：'+text[:80]+('…' if len(text)>80 else ''))
+        self.recognized.setVisible(bool(text))
+        self.recognized.setToolTip(text)
         self.adjustSize()
 
     def set_call_active(self, active, conversation_id=None):
@@ -404,6 +412,7 @@ class PetSpeechBubble(QFrame):
         self.adjustSize();self.follow_pet()
 
     def set_voice_state(self,state):
+        if state=='preparing':self.recognized.hide()
         self.talk_dock.set_state(state)
 
     def set_voice_level(self,value):

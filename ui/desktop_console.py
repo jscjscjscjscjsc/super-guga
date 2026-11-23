@@ -38,6 +38,8 @@ class DesktopConsole(QDialog):
         form.addRow('聊天模型来源',self.source)
         self.base=QLineEdit(str(self.cfg.get('base_url','')));form.addRow('服务地址',self.base)
         self.model=QLineEdit(str(self.cfg.get('model','')));form.addRow('模型名称',self.model)
+        preset=QPushButton('使用 DeepSeek Flash 推荐配置')
+        preset.clicked.connect(self.deepseek_preset);form.addRow(preset)
         self.key=QLineEdit();self.key.setEchoMode(QLineEdit.Password);form.addRow('API 密钥',self.key)
         note=QLabel('用于对话和任务调度。视觉模型、语音输出和长语音可分别设置。',objectName='Muted');note.setWordWrap(True);form.addRow(note)
         self.test=QPushButton('测试聊天模型');self.test.clicked.connect(self.check_driver);form.addRow(self.test)
@@ -45,16 +47,21 @@ class DesktopConsole(QDialog):
         self._build_vision_page(tabs)
         speech=QWidget();speech_form=QFormLayout(speech)
         self.tts=QComboBox();self.tts.addItem('Edge TTS（默认，无需密钥）','edge');self.tts.addItem('豆包语音（需已有密钥）','doubao')
+        from core.guga_voice import available
+        if available() or self.raw.get('tts_provider')=='guga_local':
+            self.tts.addItem('咕嘎专属声音（本机）','guga_local')
         self.tts.setCurrentIndex(max(0,self.tts.findData(self.raw.get('tts_provider','edge'))))
         speech_form.addRow('语音输出',self.tts)
         self.voice=QLineEdit(self.raw.get('edge_voice','zh-CN-XiaoyiNeural'));speech_form.addRow('Edge 音色',self.voice)
         self.rate=QLineEdit(self.raw.get('edge_rate','+15%'));speech_form.addRow('语速',self.rate)
         self.pitch=QLineEdit(self.raw.get('edge_pitch','+14Hz'));speech_form.addRow('音调',self.pitch)
-        speech_form.addRow(QLabel('不设置时直接使用 Edge TTS；手动录音使用本地识别。'))
+        note=QLabel('专属声音用于咕嘎的聊天朗读和点击录音后的回复。第一次使用时会加载本地模型。')
+        note.setWordWrap(True)
+        speech_form.addRow(note)
         preview=QPushButton('保存并试听');preview.clicked.connect(self.preview);speech_form.addRow(preview)
         tabs.addTab(speech,'语音输出')
         realtime=QWidget();rt=QVBoxLayout(realtime)
-        label=QLabel('长语音模型是可选通道。\n开启后保留连接；手动录音优先，录音结束后恢复。\n额度耗尽或连接失败时，手动录音继续走驱动模型 + Edge TTS。')
+        label=QLabel('长语音模型使用独立音色。\n手动录音优先，录音结束后恢复长语音。\n长语音不可用时，点击录音仍可使用所选朗读音色。')
         label.setWordWrap(True);rt.addWidget(label)
         settings=QPushButton('设置长语音模型');settings.clicked.connect(lambda:pet._ensure_agent_panel().open_voice_settings());rt.addWidget(settings);rt.addStretch()
         tabs.addTab(realtime,'长语音（可选）')
@@ -101,6 +108,11 @@ class DesktopConsole(QDialog):
         except ValueError:host=None
         self.vision_target.setText(model + ('  ·  '+host if host else ''))
 
+    def deepseek_preset(self):
+        self.source.setCurrentIndex(self.source.findData('custom'))
+        self.base.setText('https://api.deepseek.com');self.model.setText('deepseek-flash')
+        self.status.setText('已填写 DeepSeek Flash 官方接口参数；填入密钥后保存并测试连接。')
+
     def source_changed(self):
         linked=self.source.currentData()=='dsh'
         self.base.setReadOnly(linked);self.model.setReadOnly(linked);self.key.setEnabled(not linked)
@@ -131,6 +143,9 @@ class DesktopConsole(QDialog):
         if not re.fullmatch(r'[+-]\d+%',values['edge_rate']):raise ValueError('语速请使用 +15% 或 -10% 这样的格式')
         if not re.fullmatch(r'[+-]\d+Hz',values['edge_pitch']):raise ValueError('音调请使用 +14Hz 或 -5Hz 这样的格式')
         if values['tts_provider']=='doubao' and not self.raw.get('doubao_tts_api_key'):raise ValueError('尚未配置豆包语音密钥；Edge TTS 无需此密钥')
+        if values['tts_provider']=='guga_local':
+            from core.guga_voice import available
+            if not available():raise ValueError('咕嘎专属声音尚未准备好，请检查本地模型和参考音频')
         return values
 
     def save(self):

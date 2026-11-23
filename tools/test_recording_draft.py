@@ -14,6 +14,7 @@ APP=QApplication.instance() or QApplication([])
 
 class Recorder:
     available=True;error=None;level=.5
+    _frame_count=8000
     def __init__(self):self.starts=0;self.stops=0
     def start(self):self.starts+=1
     def stop(self):self.stops+=1;return '打开 浏览器'
@@ -48,11 +49,13 @@ class RecordingDraftTests(unittest.TestCase):
         self.voice.stop();self.voice.stop()
         self.pump(lambda:not self.voice.active)
         self.assertEqual(self.sent,['打开浏览器']);self.assertEqual(self.recorder.stops,1)
+        self.assertEqual(self.voice.last_capture['frames_captured'],8000)
 
     def test_cancel_while_recording_never_sends(self):
         self.voice.start();self.pump(lambda:self.voice.phase=='recording')
         self.voice.stop(cancel=True);self.pump(lambda:not self.voice._worker.is_alive())
         self.assertEqual(self.sent,[]);self.assertEqual(self.recorder.stops,1)
+        self.assertEqual(self.voice.last_capture,{})
         self.assertEqual(self.voice.phase,'idle')
 
     def test_cancel_ready_draft_discards_it(self):

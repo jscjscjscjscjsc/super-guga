@@ -1,0 +1,14 @@
+{
+  "method": "built-in imagegen",
+  "reference": "guga-dawn-v2.png",
+  "assets": [
+    {
+      "file": "guga-dawn-plate.png",
+      "prompt": "Use case: precise-object-edit. Production asset: empty background plate for the attached original animation still. Input image 1 is the EXCLUSIVE edit target. Remove just the chibi girl in the penguin costume from center-right, including her contact shadow and footprints immediately under her. Reconstruct the occluded pale blue sky, soft icy mountains and snow bank by continuing the exact shapes, direction and texture from both sides. Leave all the surrounding pixels, framing, camera, lighting, lake horizon, foreground ice branches, rocks, palette and layout as close to the input as possible. Horizontal 16:10 same exact framing. It should be an empty snowy landscape and look as if the character had not yet entered this identical shot. No text, no typography, no border, no figures or animals. Preserve the upper-left dawn light and the smooth pale sky."
+    },
+    {
+      "file": "guga-flight.png",
+      "prompt": "Use case: background-extraction. Input image 1 is the edit target. Extract ONLY the original happy chibi girl wearing the penguin suit from the still, with a genuinely transparent alpha background. Precisely preserve her exact outline, pose, proportions, closed-eye laugh, bob and hair clip, one flipper raised, costume folds, collar's silver paperclip, both yellow feet and the original direction and temperature of the warm dawn rim light. Preserve original detail and shading and avoid redrawing her if possible. Include every limb and the flyaway hair. Remove ALL environment including snow contact shadow and any ground behind or between her feet. No scenery, no pedestal, no colored outlines, no text, no drop shadow. A compact portrait-oriented composition with a small transparent margin around the full figure. Game-ready isolated sprite intended to be composited back onto the same scene."
+    }
+  ]
+}

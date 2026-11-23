@@ -25,11 +25,14 @@ def run():
     result = dict(edge_synthesis=False, local_asr=False, microphone_tested=False, speakers_tested=False)
     result['edge_synthesis'] = TTSEngine._synth_edge(cfg, '咕嘎，打开浏览器。', str(output))
     if result['edge_synthesis']:
-        import imageio_ffmpeg
+        import av
         wav = folder/'edge-local-voice.wav'
-        subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), '-y', '-loglevel', 'error',
-                        '-i',str(output),'-ar','16000','-ac','1',str(wav)],
-                       check=True,timeout=15,creationflags=0x08000000)
+        resampler=av.AudioResampler(format='s16',layout='mono',rate=16000)
+        with av.open(str(output)) as container, wave.open(str(wav),'wb') as stream:
+            stream.setnchannels(1);stream.setsampwidth(2);stream.setframerate(16000)
+            for frame in container.decode(audio=0):
+                for converted in resampler.resample(frame):stream.writeframes(converted.to_ndarray().tobytes())
+            for converted in resampler.resample(None):stream.writeframes(converted.to_ndarray().tobytes())
         import vosk
         from core.asr import MODEL_DIR
         vosk.SetLogLevel(-1)

@@ -1,5 +1,5 @@
 """Per-agent local memory. Credentials are redacted; no screenshot payloads."""
-import re,sqlite3,time,json
+import re,sqlite3,time,json,os
 from core.agent_identity import PERSONALITIES,VOICES
 from contextlib import contextmanager
 from pathlib import Path
@@ -7,7 +7,7 @@ from pathlib import Path
 from core.desktop_access import redact
 
 ROOT=Path(__file__).resolve().parents[1]
-DEFAULT_PATH=ROOT/'runtime/multiagent/memory.sqlite3'
+DEFAULT_PATH=Path(os.environ.get('GUGA_MEMORY_DB') or ROOT/'runtime/multiagent/memory.sqlite3')
 PROFILES={
     '001':dict(display_name='咕嘎',role='管家与陪伴伙伴',specialty='日常陪伴、习惯与计划管理、生活协助、电脑事务与任务协调',expression='happy',appearance='guga'),
     '002':dict(display_name='大肥鱼',role='技术审查员',specialty='DeepSeek Harness、方案审查、长任务拆解、测试验收与漏洞检查',expression='surprised',appearance='dafish'),

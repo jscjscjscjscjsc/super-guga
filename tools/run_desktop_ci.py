@@ -12,7 +12,8 @@ MODULES=(
     'independent_chat','companion_chat','companion_memory','driver_voice_repair',
     'floating_chat','fresh_context','recording_draft','realtime_voice',
     'long_voice_stability','voice_resilience','voice_conversation_controls',
-    'daily_plan','super_agent_tools','companion_workbench','agent_identity','workflow_catalog',
+    'daily_plan','super_agent_tools','companion_workbench','agent_identity','workflow_catalog','startup_animation',
+    'music_performance','local_readiness',
 )
 
 
@@ -22,7 +23,8 @@ def main():
         print('\n=== tools.test_'+name+' ===',flush=True)
         with tempfile.TemporaryDirectory(prefix='guga-ci-') as folder:
             env=os.environ.copy();env.update(QT_QPA_PLATFORM='offscreen',PYTHONIOENCODING='utf-8',
-                GUGA_SUPER_AGENT='off',GUGA_LINGSHU='off',GUGA_TASKS_DB=str(Path(folder)/'tasks.sqlite3'))
+                GUGA_SUPER_AGENT='off',GUGA_LINGSHU='off',GUGA_TASKS_DB=str(Path(folder)/'tasks.sqlite3'),
+                GUGA_MEMORY_DB=str(Path(folder)/'memory.sqlite3'))
             try:
                 result=subprocess.run([sys.executable,'-X','utf8','-m','unittest','tools.test_'+name,'-v'],
                                       cwd=ROOT,env=env,timeout=90)

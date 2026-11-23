@@ -319,7 +319,7 @@ def _composer(p):
     p.pet._screen_tools.selection_enabled_changed.connect(p.explain_button.setChecked)
     tools.setMenu(menu)
     controls.addWidget(tools)
-    p.short_voice_button = _button('说话', '录音后发送', p.toggle_short_voice)
+    p.short_voice_button = _button('说话', '点击录音，在录音条点击 ↑ 发送，× 取消', p.toggle_short_voice)
     controls.addWidget(p.short_voice_button)
     p.voice_button = _button('实时语音', '使用实时语音模型通话')
     p.voice_button.setCheckable(True)

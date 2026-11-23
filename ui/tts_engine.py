@@ -27,6 +27,7 @@ import subprocess
 from urllib.parse import urlsplit
 from PyQt5.QtCore import QObject, pyqtSignal, QUrl
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from ui.tts_pcm import SpeechPcmOutput
 
 # 朗读前去除标点（TTS 不读标点符号）
 _PUNCT_RE = re.compile(r'[，。！？、；：“”‘’（）【】《》〈〉…—·｜|%％~\-_]+')
@@ -126,6 +127,8 @@ class TTSEngine(QObject):
 
     # 主线程接收: (token, path) — 合成完毕, 主线程负责播放
     _synth_ready = pyqtSignal(int, str, object)
+    _synth_pcm = pyqtSignal(int, bytes)
+    _synth_eof = pyqtSignal(int)
     # 主线程接收: (token,) — 合成失败, 主线程负责收尾
     _synth_failed = pyqtSignal(int)
 
@@ -134,6 +137,10 @@ class TTSEngine(QObject):
         self._player = QMediaPlayer()
         self._player.setVolume(80)
         self._player.stateChanged.connect(self._on_state_changed)
+        self._pcm = SpeechPcmOutput(self._player, self)
+        self._pcm.playing.connect(self._announce_playback)
+        self._pcm.finished.connect(self._finish_playback)
+        self._pcm.failed.connect(self._pcm_failed)
         self._temp_files = []   # 主线程持有, 仅主线程修改
         self._is_speaking = False
         self._silent = False    # 静默: 只关本地朗读播报
@@ -147,6 +154,8 @@ class TTSEngine(QObject):
         self.last_error = ''      # 最近一次合成/播放失败的短原因
         self._last_provider = ''  # 最近一次成功合成用的通道: edge / doubao
         self._last_bytes = 0      # 最近一次成功合成的音频字节数
+        from core.guga_voice import GugaVoice
+        self._guga_voice_worker = GugaVoice()
 
         try:
             cfg_path = os.path.join(os.path.dirname(__file__), '..', 'ai_config.json')
@@ -168,6 +177,8 @@ class TTSEngine(QObject):
         # 信号 → 主线程槽
         self._synth_ready.connect(self._on_synth_ready)
         self._synth_failed.connect(self._on_synth_failed)
+        self._synth_pcm.connect(self._on_synth_pcm)
+        self._synth_eof.connect(self._on_synth_eof)
 
         # 启动时清理上次崩溃残留的临时 mp3
         self._cleanup_stale_tmp()
@@ -180,6 +191,8 @@ class TTSEngine(QObject):
         from core.model_settings import read_raw
         cfg=read_raw()
         self.provider=cfg.get('tts_provider') or 'edge'
+        if self.provider != 'guga_local':
+            self.close_voice_worker()
         self.EDGE_VOICE=cfg.get('edge_voice') or type(self).EDGE_VOICE
         self.EDGE_RATE=cfg.get('edge_rate') or type(self).EDGE_RATE
         self.EDGE_PITCH=cfg.get('edge_pitch') or type(self).EDGE_PITCH
@@ -215,7 +228,8 @@ class TTSEngine(QObject):
         except Exception as e:
             playback_error = str(e)
         provider = getattr(self, 'provider', 'edge') or 'edge'
-        voice = self.DOUBAO_VOICE if provider == 'doubao' else self.EDGE_VOICE
+        voice = ('咕嘎专属声线' if provider == 'guga_local' else
+                 self.DOUBAO_VOICE if provider == 'doubao' else self.EDGE_VOICE)
         return {
             'silent': bool(self._silent),
             'provider': provider,
@@ -238,9 +252,8 @@ class TTSEngine(QObject):
             # 静默不是"合成失败"，但必须留下痕迹: 整机朗读与碎碎念都走这里
             self.last_error = 'silent=true（agent/silent 开启，本机朗读被静默）'
             return
-        if not text.strip():
-            return
-        text = strip_punct(text)
+        original = text.strip()
+        text = strip_punct(original)
         if not text.strip():
             return
         self.last_error = ''
@@ -252,9 +265,26 @@ class TTSEngine(QObject):
         self._display_text = text
         self._playback_announced = False
         self.speak_started.emit(text)
+        stream = False
+        if self.provider == 'guga_local' and not voice_profile:
+            from core.guga_voice import fast_available, prepared_clip
+            clip = prepared_clip(original)
+            try:
+                size = clip.stat().st_size
+            except OSError:
+                size = 0
+            if size > 100:
+                self._last_provider = 'guga_local'
+                self._last_bytes = size
+                self._on_synth_ready(token, str(clip), _speech_envelope(str(clip)), temporary=False)
+                return
+            # The local model uses punctuation for phrasing and pauses.
+            text = original
+            stream = fast_available() and self._pcm.available()
         threading.Thread(
             target=self._synth_worker,
             args=(token,text,dict(voice_profile)) if voice_profile else (token,text),
+            kwargs={'stream': True} if stream else {},
             daemon=True,
         ).start()
 
@@ -263,33 +293,61 @@ class TTSEngine(QObject):
         self._speak_token += 1  # 让尚未完成的合成无效
         self._stop_playback()
 
+    def close_voice_worker(self):
+        worker = getattr(self, '_guga_voice_worker', None)
+        if worker is not None:
+            worker.close()
+
     # ---- 主线程: 停止播放 ----
     def _stop_playback(self):
+        self._pcm.stop()
         if self._is_speaking:
             try:
                 self._player.stop()
             except Exception:
                 pass
-        self._is_speaking = False
-        self._display_text = ''
-        self._playback_announced = False
+        self._finish_playback()
         self._cleanup_temp()
 
     # ---- 后台线程: 合成 ----
-    def _synth_worker(self, token: int, text: str, voice_profile=None):
-        """后台线程只负责生成 mp3 文件; 完成后发信号回主线程"""
+    def _synth_worker(self, token: int, text: str, voice_profile=None, *, stream=False):
+        """Send PCM to Qt as it arrives, or hand off a completed audio file."""
         tmp_path = None
         try:
+            provider = getattr(self, 'provider', 'edge')
+            local = provider == 'guga_local' and not voice_profile
             tmp = tempfile.NamedTemporaryFile(
-                prefix=_TMP_PREFIX, suffix='.mp3', delete=False,
+                prefix=_TMP_PREFIX, suffix='.wav' if local else '.mp3', delete=False,
                 dir=tempfile.gettempdir())
             tmp_path = tmp.name
             tmp.close()
 
             success = False
             used = ''
-            provider = getattr(self, 'provider', 'edge')
-            if self._use_edge and (provider == 'edge' or voice_profile):
+            if local:
+                pcm_bytes = 0
+
+                def on_chunk(packet, rate):
+                    if rate != 24000:
+                        raise ValueError('本机语音流的采样率不受支持')
+                    nonlocal pcm_bytes
+                    pcm_bytes += len(packet)
+                    self._synth_pcm.emit(token, packet)
+
+                success = self._guga_voice_worker.synthesize(text, tmp_path,
+                    current=lambda: token == self._speak_token, on_chunk=on_chunk if stream else None)
+                if not success:
+                    self._safe_remove(tmp_path)
+                    return
+                used = 'guga_local'
+                if pcm_bytes:
+                    self._safe_remove(tmp_path)
+                    if token == self._speak_token:
+                        self._last_provider = used
+                        self._last_bytes = pcm_bytes
+                        self._synth_eof.emit(token)
+                    return
+            elif self._use_edge and (provider == 'edge' or voice_profile):
                 success = self._synth_edge(text, tmp_path, voice_profile)
                 if success:
                     used = 'edge'
@@ -299,6 +357,10 @@ class TTSEngine(QObject):
                 success = self._synth_doubao(text, tmp_path)
                 if success:
                     used = 'doubao'
+
+            if token != self._speak_token:
+                self._safe_remove(tmp_path)
+                return
 
             if not success:
                 if not self.last_error:
@@ -322,6 +384,8 @@ class TTSEngine(QObject):
             self._last_bytes = size
             self._synth_ready.emit(token, tmp_path, _speech_envelope(tmp_path))
         except Exception as e:
+            if token == self._speak_token:
+                self.last_error = str(e) if isinstance(e, RuntimeError) else type(e).__name__
             print(f"[TTS] synth_worker 错误: {e}", file=sys.stderr)
             self._safe_remove(tmp_path)
             try:
@@ -423,21 +487,19 @@ class TTSEngine(QObject):
             return False
 
     # ---- 主线程槽: 合成完成 ----
-    def _on_synth_ready(self, token: int, path: str, envelope=()):
-        # 若已经被新的 speak / stop 失效, 直接清理不播放
-        if token != self._speak_token:
-            self._safe_remove(path)
-            return
-        # 若 _is_speaking 已被 stop 清掉, 也不要播
-        if not self._is_speaking:
-            self._safe_remove(path)
+    def _on_synth_ready(self, token: int, path: str, envelope=(), *, temporary: bool = True):
+        # 失效的请求只清掉临时文件，预制音频可重复使用。
+        if token != self._speak_token or not self._is_speaking:
+            if temporary:
+                self._safe_remove(path)
             return
         try:
             # 临时文件列表限长: 超出 _MAX_TEMP_FILES 删最旧
-            self._temp_files.append(path)
-            while len(self._temp_files) > _MAX_TEMP_FILES:
-                old = self._temp_files.pop(0)
-                self._safe_remove(old)
+            if temporary:
+                self._temp_files.append(path)
+                while len(self._temp_files) > _MAX_TEMP_FILES:
+                    old = self._temp_files.pop(0)
+                    self._safe_remove(old)
 
             url = QUrl.fromLocalFile(path)
             content = QMediaContent(url)
@@ -448,7 +510,8 @@ class TTSEngine(QObject):
         except Exception as e:
             print(f"[TTS] 播放错误: {e}", file=sys.stderr)
             self.last_error = f'播放失败: {e}'
-            self._safe_remove(path)
+            if temporary:
+                self._safe_remove(path)
             self._is_speaking = False
             self.speech_failed.emit('本机语音播放失败')
             try:
@@ -461,6 +524,7 @@ class TTSEngine(QObject):
             return
         if not self.last_error:
             self.last_error = '合成失败'
+        self._pcm.stop()
         self._is_speaking = False
         self.speech_failed.emit('本机语音合成失败')
         try:
@@ -468,20 +532,41 @@ class TTSEngine(QObject):
         except Exception:
             pass
 
-    def _on_state_changed(self, state):
-        if state == QMediaPlayer.PlayingState and self._is_speaking and not self._playback_announced:
+    def _on_synth_pcm(self, token, packet):
+        if token == self._speak_token and self._is_speaking:
+            self._pcm.append(packet)
+
+    def _on_synth_eof(self, token):
+        if token == self._speak_token and self._pcm.active:
+            self._pcm.finish()
+
+    def _pcm_failed(self):
+        self.last_error = '本机语音流播放失败'
+        self._speak_token += 1
+        self.speech_failed.emit(self.last_error)
+        self._finish_playback()
+
+    def _announce_playback(self):
+        if self._is_speaking and not self._playback_announced:
             self._playback_announced = True
-            try:self.playback_started.emit(self._display_text)
-            except Exception:pass
-        if state == QMediaPlayer.StoppedState and self._is_speaking:
-            self._is_speaking = False
-            self._display_text = ''
-            self._playback_announced = False
-            self._cleanup_temp()
-            try:
-                self.speak_finished.emit()
-            except Exception:
-                pass
+            self.playback_started.emit(self._display_text)
+
+    def _finish_playback(self):
+        if not self._is_speaking:
+            return
+        self._is_speaking = False
+        self._display_text = ''
+        self._playback_announced = False
+        self._cleanup_temp()
+        self.speak_finished.emit()
+
+    def _on_state_changed(self, state):
+        if self._current_token != self._speak_token:
+            return
+        if state == QMediaPlayer.PlayingState:
+            self._announce_playback()
+        elif state == QMediaPlayer.StoppedState and not self._pcm.active:
+            self._finish_playback()
 
     # ---- 临时文件清理 ----
     def _cleanup_temp(self):
@@ -505,7 +590,9 @@ class TTSEngine(QObject):
         try:
             tmp_dir = tempfile.gettempdir()
             now = time.time()
-            for f in glob.glob(os.path.join(tmp_dir, _TMP_PREFIX + '*.mp3')):
+            for f in glob.glob(os.path.join(tmp_dir, _TMP_PREFIX + '*')):
+                if os.path.splitext(f)[1].lower() not in ('.mp3','.wav'):
+                    continue
                 try:
                     # 只清 1 天以内的(避免误删他人文件), 老文件系统自己会清
                     if now - os.path.getmtime(f) < 86400:
